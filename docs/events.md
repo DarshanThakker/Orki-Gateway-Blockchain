@@ -1,0 +1,6 @@
+PaymentReceived(merchant_id, payer, token_in, amount_in, chain_id)
+SwapExecuted(merchant_id, token_in, token_out, amount_in, amount_out)
+FeeCollected(merchant_id, fee_amount, fee_token)
+PaymentForwarded(merchant_id, wallet, amount_sent, settlement_token)
+MerchantRegistered(merchant_id, owner)
+PauseStateChanged(paused)
