@@ -1,3 +1,0 @@
-[submodule "contracts/evm"]
-	path = contracts/evm
-	url = https://github.com/DarshanThakker/Orki-EVM-.git
