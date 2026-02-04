@@ -1,247 +1,262 @@
 use anchor_lang::prelude::*;
+use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
-declare_id!("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkgPoxhZxvSMP");
+declare_id!("C9k2E4oE3SWB7wuCm5YwaLeYJg5DCqxBXFUDoDpzdDp9");
 
 #[program]
 pub mod orki_gateway {
     use super::*;
 
-    pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
-        let state = &mut ctx.accounts.state;
+    pub fn initialize(ctx: Context<Initialize>, fee_bps: u16) -> Result<()> {
+        let state = &mut ctx.accounts.global_state;
         state.admin = ctx.accounts.admin.key();
+        state.fee_bps = fee_bps;
         state.paused = false;
-        state.fee_bps = 100; // 1% default fee
-        state.treasury = ctx.accounts.admin.key(); // Default treasury is admin
         Ok(())
     }
 
-    pub fn register_merchant(ctx: Context<RegisterMerchant>, name: String, wallet: Pubkey) -> Result<()> {
-        // Check that the admin is calling this
-        require!(
-            ctx.accounts.admin.key() == ctx.accounts.state.admin,
-            GatewayError::Unauthorized
-        );
-        
+    pub fn register_merchant(
+        ctx: Context<RegisterMerchant>,
+        settlement_wallet: Pubkey,
+        settlement_token: Pubkey,
+    ) -> Result<()> {
         let merchant = &mut ctx.accounts.merchant;
-        merchant.name = name;
-        merchant.wallet = wallet;
-        merchant.active = true;
+        merchant.owner = ctx.accounts.owner.key();
+        merchant.settlement_wallet = settlement_wallet;
+        merchant.settlement_token = settlement_token;
+        merchant.swap_enabled = false;
         Ok(())
     }
 
-    pub fn set_pause(ctx: Context<SetPause>, pause: bool) -> Result<()> {
-        require!(
-            ctx.accounts.admin.key() == ctx.accounts.state.admin,
-            GatewayError::Unauthorized
-        );
+    pub fn update_merchant(
+        ctx: Context<UpdateMerchant>,
+        settlement_wallet: Pubkey,
+        settlement_token: Pubkey,
+        swap_enabled: bool
+    ) -> Result<()> {
+        let merchant = &mut ctx.accounts.merchant;
+        // Verify owner
+        require!(merchant.owner == ctx.accounts.owner.key(), ErrorCode::Unauthorized);
         
-        ctx.accounts.state.paused = pause;
+        merchant.settlement_wallet = settlement_wallet;
+        merchant.settlement_token = settlement_token;
+        merchant.swap_enabled = swap_enabled;
         Ok(())
     }
 
-    pub fn update_fees(ctx: Context<UpdateFees>, fee_bps: u16) -> Result<()> {
-        require!(
-            ctx.accounts.admin.key() == ctx.accounts.state.admin,
-            GatewayError::Unauthorized
-        );
-        
-        require!(fee_bps <= 10000, GatewayError::InvalidFee); // Max 100% fee
-        ctx.accounts.state.fee_bps = fee_bps;
+    // Admin functions
+    pub fn set_fee(ctx: Context<AdminAuth>, new_fee_bps: u16) -> Result<()> {
+        let state = &mut ctx.accounts.global_state;
+        state.fee_bps = new_fee_bps;
+        Ok(())
+    }
+
+    pub fn set_paused(ctx: Context<AdminAuth>, paused: bool) -> Result<()> {
+        let state = &mut ctx.accounts.global_state;
+        state.paused = paused;
+        Ok(())
+    }
+
+    pub fn update_admin(ctx: Context<AdminAuth>, new_admin: Pubkey) -> Result<()> {
+        let state = &mut ctx.accounts.global_state;
+        state.admin = new_admin;
         Ok(())
     }
 
     pub fn process_payment(
-        ctx: Context<ProcessPayment>, 
-        amount: u64
+        ctx: Context<ProcessPayment>,
+        amount: u64,
     ) -> Result<()> {
-        // Check if gateway is paused
-        require!(!ctx.accounts.state.paused, GatewayError::GatewayPaused);
-        
-        // Check if merchant is active
-        require!(ctx.accounts.merchant.active, GatewayError::MerchantInactive);
-        
-        // Verify the merchant wallet matches
-        require!(
-            ctx.accounts.merchant_wallet.key() == ctx.accounts.merchant.wallet,
-            GatewayError::InvalidMerchantWallet
-        );
-        
-        // Calculate fee (fee_bps = basis points, e.g., 100 = 1%)
-        let fee = amount
-            .checked_mul(ctx.accounts.state.fee_bps as u64)
-            .ok_or(GatewayError::CalculationError)?
-            .checked_div(10000)
-            .ok_or(GatewayError::CalculationError)?;
-        
-        let merchant_amount = amount
-            .checked_sub(fee)
-            .ok_or(GatewayError::CalculationError)?;
-        
-        // Transfer funds to merchant (minus fee)
-        let transfer_to_merchant = anchor_lang::system_program::Transfer {
-            from: ctx.accounts.payer.to_account_info(),
-            to: ctx.accounts.merchant_wallet.to_account_info(),
-        };
-        
-        anchor_lang::system_program::transfer(
-            CpiContext::new(
-                ctx.accounts.system_program.to_account_info(),
-                transfer_to_merchant,
-            ),
-            merchant_amount,
-        )?;
-        
-        // Transfer fee to treasury (if fee > 0)
-        if fee > 0 {
-            let transfer_to_treasury = anchor_lang::system_program::Transfer {
-                from: ctx.accounts.payer.to_account_info(),
-                to: ctx.accounts.treasury.to_account_info(),
-            };
+        let state = &ctx.accounts.global_state;
+        let merchant = &ctx.accounts.merchant;
+
+        require!(!state.paused, ErrorCode::Paused);
+
+        // Calculate Fee
+        let fee = amount * state.fee_bps as u64 / 10_000;
+        let merchant_amount = amount - fee;
+
+        if let Some(mint) = &ctx.accounts.mint {
+            // --- SPL TOKEN PAYMENT ---
             
+            // 1. Validation
+            // Ensure merchant accepts this token (or if not set, they accept SOL, so fail if they expect SOL but got Token)
+            // User req: "Enforce: if merchant.settlement_token is set, mint must match"
+            if merchant.settlement_token != Pubkey::default() {
+                 require!(mint.key() == merchant.settlement_token, ErrorCode::InvalidToken);
+            } else {
+                 // Merchant expects SOL (settlement_token is default), but we got Token
+                 // For V1, no swap, so we must error if mismatch
+                 return Err(ErrorCode::InvalidToken.into());
+            }
+
+            let token_program = ctx.accounts.token_program.as_ref().ok_or(ErrorCode::MissingTokenProgram)?;
+            let payer_ta = ctx.accounts.payer_token_account.as_ref().ok_or(ErrorCode::MissingAccount)?;
+            let merchant_ta = ctx.accounts.merchant_token_account.as_ref().ok_or(ErrorCode::MissingAccount)?;
+            let fee_ta = ctx.accounts.fee_token_account.as_ref().ok_or(ErrorCode::MissingAccount)?;
+
+            // 2. Transfer Fee to Fee Vault
+            let cpi_accounts_fee = Transfer {
+                from: payer_ta.to_account_info(),
+                to: fee_ta.to_account_info(),
+                authority: ctx.accounts.payer.to_account_info(),
+            };
+            token::transfer(CpiContext::new(token_program.to_account_info(), cpi_accounts_fee), fee)?;
+
+            // 3. Transfer Amount to Merchant
+            let cpi_accounts_merchant = Transfer {
+                from: payer_ta.to_account_info(),
+                to: merchant_ta.to_account_info(),
+                authority: ctx.accounts.payer.to_account_info(),
+            };
+            token::transfer(CpiContext::new(token_program.to_account_info(), cpi_accounts_merchant), merchant_amount)?;
+
+        } else {
+            // --- NATIVE SOL PAYMENT ---
+            
+            // 1. Validation
+            // If merchant expects Token, but got SOL
+            if merchant.settlement_token != Pubkey::default() {
+                return Err(ErrorCode::InvalidToken.into());
+            }
+
+            // Ensure passed wallets match expected
+            require!(ctx.accounts.merchant_wallet.key() == merchant.settlement_wallet, ErrorCode::InvalidMerchantWallet);
+            
+            // 2. Transfer Fee
             anchor_lang::system_program::transfer(
                 CpiContext::new(
                     ctx.accounts.system_program.to_account_info(),
-                    transfer_to_treasury,
+                    anchor_lang::system_program::Transfer {
+                        from: ctx.accounts.payer.to_account_info(),
+                        to: ctx.accounts.fee_wallet.to_account_info(),
+                    },
                 ),
                 fee,
             )?;
+
+            // 3. Transfer Merchant Amount
+            anchor_lang::system_program::transfer(
+                CpiContext::new(
+                    ctx.accounts.system_program.to_account_info(),
+                    anchor_lang::system_program::Transfer {
+                        from: ctx.accounts.payer.to_account_info(),
+                        to: ctx.accounts.merchant_wallet.to_account_info(),
+                    },
+                ),
+                merchant_amount,
+            )?;
         }
-        
-        // Emit an event
+
         emit!(PaymentProcessed {
             payer: ctx.accounts.payer.key(),
             merchant: ctx.accounts.merchant.key(),
-            merchant_wallet: ctx.accounts.merchant.wallet,
             amount,
             fee,
-            merchant_amount,
-            timestamp: Clock::get()?.unix_timestamp,
+            token: ctx.accounts.mint.as_ref().map(|m| m.key()).unwrap_or(Pubkey::default()),
         });
-        
+
         Ok(())
     }
 }
 
+#[account]
+pub struct GlobalState {
+    pub admin: Pubkey,
+    pub fee_bps: u16,
+    pub paused: bool,
+}
+
+#[account]
+pub struct Merchant {
+    pub owner: Pubkey,
+    pub settlement_wallet: Pubkey,
+    pub settlement_token: Pubkey,
+    pub swap_enabled: bool,
+}
+
 #[derive(Accounts)]
 pub struct Initialize<'info> {
+    #[account(init, payer = admin, space = 8 + 32 + 2 + 1)]
+    pub global_state: Account<'info, GlobalState>,
     #[account(mut)]
     pub admin: Signer<'info>,
-    #[account(
-        init,
-        payer = admin,
-        space = 8 + GatewayState::INIT_SPACE,
-        seeds = [b"gateway_state"],
-        bump
-    )]
-    pub state: Account<'info, GatewayState>,
     pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
 pub struct RegisterMerchant<'info> {
-    #[account(mut)]
-    pub admin: Signer<'info>,
-    #[account(
-        init,
-        payer = admin,
-        space = 8 + Merchant::INIT_SPACE,
-        seeds = [b"merchant", admin.key().as_ref()],
-        bump
-    )]
+    #[account(init, payer = owner, space = 8 + 32 + 32 + 32 + 1)]
     pub merchant: Account<'info, Merchant>,
-    #[account(
-        seeds = [b"gateway_state"],
-        bump
-    )]
-    pub state: Account<'info, GatewayState>,
+    #[account(mut)]
+    pub owner: Signer<'info>,
     pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
-pub struct SetPause<'info> {
+pub struct UpdateMerchant<'info> {
     #[account(mut)]
-    pub admin: Signer<'info>,
-    #[account(
-        mut,
-        seeds = [b"gateway_state"],
-        bump
-    )]
-    pub state: Account<'info, GatewayState>,
+    pub merchant: Account<'info, Merchant>,
+    pub owner: Signer<'info>,
 }
 
 #[derive(Accounts)]
-pub struct UpdateFees<'info> {
-    #[account(mut)]
+pub struct AdminAuth<'info> {
+    #[account(mut, has_one = admin)]
+    pub global_state: Account<'info, GlobalState>,
     pub admin: Signer<'info>,
-    #[account(
-        mut,
-        seeds = [b"gateway_state"],
-        bump
-    )]
-    pub state: Account<'info, GatewayState>,
 }
 
 #[derive(Accounts)]
 pub struct ProcessPayment<'info> {
+    pub global_state: Account<'info, GlobalState>,
+    pub merchant: Account<'info, Merchant>,
+    
     #[account(mut)]
     pub payer: Signer<'info>,
-    #[account(mut)]
-    pub merchant: Account<'info, Merchant>,
-    /// CHECK: This is the merchant's wallet that receives payments
+    
+    /// CHECK: Merchant wallet to receive funds (For SOL payment)
     #[account(mut)]
     pub merchant_wallet: AccountInfo<'info>,
-    #[account(
-        seeds = [b"gateway_state"],
-        bump
-    )]
-    pub state: Account<'info, GatewayState>,
-    /// CHECK: Treasury wallet to receive fees
+    
+    /// CHECK: Fee wallet to receive fees (For SOL payment)
     #[account(mut)]
-    pub treasury: AccountInfo<'info>,
+    pub fee_wallet: AccountInfo<'info>,
+    
     pub system_program: Program<'info, System>,
-}
 
-#[account]
-#[derive(InitSpace)]
-pub struct Merchant {
-    #[max_len(32)]
-    pub name: String,
-    pub wallet: Pubkey,
-    pub active: bool,
-}
-
-#[account]
-#[derive(InitSpace)]
-pub struct GatewayState {
-    pub admin: Pubkey,
-    pub paused: bool,
-    pub fee_bps: u16,
-    pub treasury: Pubkey,
+    // --- Optional Accounts for SPL ---
+    pub token_program: Option<Program<'info, Token>>,
+    pub mint: Option<Account<'info, Mint>>,
+    #[account(mut)]
+    pub payer_token_account: Option<Account<'info, TokenAccount>>,
+    #[account(mut)]
+    pub merchant_token_account: Option<Account<'info, TokenAccount>>,
+    #[account(mut)]
+    pub fee_token_account: Option<Account<'info, TokenAccount>>,
 }
 
 #[event]
 pub struct PaymentProcessed {
     pub payer: Pubkey,
     pub merchant: Pubkey,
-    pub merchant_wallet: Pubkey,
     pub amount: u64,
     pub fee: u64,
-    pub merchant_amount: u64,
-    pub timestamp: i64,
+    pub token: Pubkey,
 }
 
 #[error_code]
-pub enum GatewayError {
+pub enum ErrorCode {
+    #[msg("Contract is paused")]
+    Paused,
     #[msg("Unauthorized access")]
     Unauthorized,
-    #[msg("Gateway is currently paused")]
-    GatewayPaused,
-    #[msg("Merchant account is not active")]
-    MerchantInactive,
-    #[msg("Invalid fee amount (must be between 0-10000 basis points)")]
-    InvalidFee,
-    #[msg("Calculation error")]
-    CalculationError,
-    #[msg("Invalid merchant wallet")]
+    #[msg("Invalid token for this merchant")]
+    InvalidToken,
+    #[msg("Missing token program")]
+    MissingTokenProgram,
+    #[msg("Missing necessary account")]
+    MissingAccount,
+    #[msg("Invalid merchant wallet provided")]
     InvalidMerchantWallet,
 }
