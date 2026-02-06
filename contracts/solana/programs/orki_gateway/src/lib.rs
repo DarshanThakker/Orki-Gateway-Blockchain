@@ -22,24 +22,7 @@ pub mod orki_gateway {
         Ok(())
     }
 
-    // pub fn register_merchant(
-    //     ctx: Context<RegisterMerchant>,
-    //     settlement_wallet: Pubkey,
-    //     settlement_token: Pubkey,
-    //     name: String,
-    // ) -> Result<()> {
-    //     require!(name.len() <= 32, ErrorCode::NameTooLong);
-        
-    //     let merchant = &mut ctx.accounts.merchant;
-    //     merchant.owner = ctx.accounts.owner.key();
-    //     merchant.settlement_wallet = settlement_wallet;
-    //     merchant.settlement_token = settlement_token;
-    //     merchant.swap_enabled = false;
-    //     merchant.name = name;
-    //     merchant.bump = ctx.bumps.merchant;
-    //     Ok(())
-    // }
-
+    
     pub fn register_merchant(
         ctx: Context<RegisterMerchant>,
         settlement_wallet: Pubkey,
@@ -106,39 +89,7 @@ pub fn update_merchant(
 }
 
 
-    // pub fn update_merchant(
-    //     ctx: Context<UpdateMerchant>,
-    //     name: String,
-    //     settlement_wallet: Option<Pubkey>,
-    //     settlement_token: Option<Pubkey>,
-    //     swap_enabled: Option<bool>,
-    //     name: Option<String>,
-    // ) -> Result<()> {
-    //     if let Some(new_name) = &name {
-    //         require!(new_name.len() <= 32, ErrorCode::NameTooLong);
-    //     }
-        
-    //     let merchant = &mut ctx.accounts.merchant;
-        
-    //     if let Some(wallet) = settlement_wallet {
-    //         merchant.settlement_wallet = wallet;
-    //     }
-        
-    //     if let Some(token) = settlement_token {
-    //         merchant.settlement_token = token;
-    //     }
-        
-    //     if let Some(enabled) = swap_enabled {
-    //         merchant.swap_enabled = enabled;
-    //     }
-        
-    //     if let Some(new_name) = name {
-    //         merchant.name = new_name;
-    //     }
-        
-    //     Ok(())
-    // }
-
+    
     pub fn set_fee(ctx: Context<AdminAuth>, new_fee_bps: u16) -> Result<()> {
         require!(new_fee_bps <= 10000, ErrorCode::InvalidFee);
         let state = &mut ctx.accounts.global_state;
@@ -176,14 +127,7 @@ pub fn update_merchant(
         require!(!state.paused, ErrorCode::Paused);
         require!(amount > 0, ErrorCode::InvalidAmount);
         
-        // Check for duplicate payment
-        // if ctx.accounts.payment_history.data_is_empty() {
-        //     // This is a new payment
-        // } else {
-        //     // Payment already processed
-        //     return Err(ErrorCode::DuplicatePayment.into());
-        // }
-
+        
         // Calculate Fee
         let fee = (amount as u128)
             .checked_mul(state.fee_bps as u128)
@@ -332,20 +276,6 @@ pub struct Initialize<'info> {
     pub system_program: Program<'info, System>,
 }
 
-// #[derive(Accounts)]
-// pub struct RegisterMerchant<'info> {
-//     #[account(
-//         init,
-//         payer = owner,
-//         space = 8 + Merchant::INIT_SPACE,
-//         seeds = [b"merchant", owner.key().as_ref()],
-//         bump
-//     )]
-//     pub merchant: Account<'info, Merchant>,
-//     #[account(mut)]
-//     pub owner: Signer<'info>,
-//     pub system_program: Program<'info, System>,
-// }
 
 #[derive(Accounts)]
 #[instruction(name: String)]

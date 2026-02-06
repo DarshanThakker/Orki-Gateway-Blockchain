@@ -193,239 +193,116 @@ contract OrkiGatewayTest is Test {
         );
     }
 
-//     function test_ProcessPaymentWithSwap() public {
-//         // Setup merchant with swap enabled
-//         vm.startPrank(owner);
+    function test_ProcessPaymentWithSwap() public {
+        // 1. Register Merchant
+        vm.prank(merchantOwner);
+        gateway.registerMerchant(
+            merchantWallet,
+            address(usdc),
+            0.01 ether,
+            10 ether
+        );
 
-//        // Register merchant
-// vm.prank(merchantOwner);
-// gateway.registerMerchant(
-//     merchantWallet,
-//     address(usdc),
-//     100 * 10 ** 6,
-//     10000 * 10 ** 6
-// );
+        // 2. Allow ETH as a payment token
+        vm.prank(merchantOwner);
+        gateway.setAllowedToken(address(0), true);
 
-// // Configure swap (owner-only)
-// vm.prank(owner);
-// gateway.setSwapConfig(
-//     merchantOwner,
-//     address(swapAdapter),
-//     true,
-//     100
-// );
+        // 3. Configure the Swap Adapter (Contract Owner only)
+        vm.prank(owner);
+        gateway.setSwapConfig(
+            merchantOwner,
+            address(swapAdapter),
+            true,
+            100 // 1% slippage
+        );
 
+        // 4. Enable Swap on Merchant profile
+        vm.prank(merchantOwner);
+        gateway.updateMerchant(merchantWallet, address(usdc), true);
 
-//         vm.stopPrank();
+        // 5. Funding
+        vm.deal(user, 2 ether);
+        // Fund the adapter so it has USDC to send to the merchant
+        usdc.mint(address(swapAdapter), 10_000 * 10 ** 6);
 
-//         // Allow ETH as payment token
-//         vm.prank(merchantOwner);
-//         gateway.setAllowedToken(address(0), true);
+        uint256 paymentAmount = 1 ether;
+        uint256 expectedFee = (paymentAmount * FEE_BPS) / 10000;
 
-//         // Enable swap on merchant
-//         vm.prank(merchantOwner);
-//         gateway.updateMerchant(merchantWallet, address(usdc), true);
+        uint256 initialVaultBalance = address(feeVault).balance;
+        uint256 initialMerchantUSDC = usdc.balanceOf(merchantWallet);
 
-//         // Fund swap adapter with USDC for testing
-//         vm.prank(owner);
-//         usdc.mint(address(swapAdapter), 1000000 * 10 ** 6);
+        // 6. Process the Payment
+        vm.prank(user);
+        gateway.processPayment{value: paymentAmount}(
+            merchantOwner,
+            address(0), // Paying with ETH
+            paymentAmount
+        );
 
-//         // Fund swap adapter with ETH
-//         vm.deal(address(swapAdapter), 100 ether);
+        // 7. Assertions
+        // Check ETH fee reached the vault
+        assertEq(
+            address(feeVault).balance,
+            initialVaultBalance + expectedFee,
+            "Fee mismatch"
+        );
 
-//         // Test ETH -> USDC swap payment
-//         uint256 paymentAmount = 1 ether;
-//         uint256 expectedFee = (paymentAmount * FEE_BPS) / 10000;
+        // Check Merchant received USDC (Price 2000 * 0.99 ETH after fee * 0.997 adapter fee)
+        // The exact amount depends on your Mock's math, but it should be > 0.
+        uint256 merchantReceived = usdc.balanceOf(merchantWallet) -
+            initialMerchantUSDC;
+        assertGt(merchantReceived, 0, "Merchant did not receive any USDC");
 
-//         uint256 initialVaultBalance = address(feeVault).balance;
+        console.log("Merchant received USDC:", merchantReceived);
 
-//         vm.prank(user);
-//         gateway.processPayment{value: paymentAmount}(
-//             merchantOwner,
-//             address(0),
-//             paymentAmount
-//         );
-
-//         // Fee should be collected in ETH
-//         assertEq(address(feeVault).balance, initialVaultBalance + expectedFee);
-//     }
-
-
-// function test_ProcessPaymentWithSwap() public {
-//     // Register merchant
-//     vm.prank(merchantOwner);
-//     gateway.registerMerchant(
-//         merchantWallet,
-//         address(usdc),
-//         100 * 10 ** 6,
-//         10000 * 10 ** 6
-//     );
-
-//     // Allow ETH payments
-//     vm.prank(owner);
-//     gateway.setAllowedToken(address(0), true);
-
-//     // Enable swap config (owner only)
-//     vm.prank(owner);
-//     gateway.setSwapConfig(
-//         merchantOwner,
-//         address(swapAdapter),
-//         true,
-//         100 // 1% slippage
-//     );
-
-//     // Enable swap on merchant
-//     vm.prank(merchantOwner);
-//     gateway.updateMerchant(merchantWallet, address(usdc), true);
-
-//     // Fund swap adapter
-//     usdc.mint(address(swapAdapter), 1_000_000 * 10 ** 6);
-//     vm.deal(address(swapAdapter), 100 ether);
-
-//     uint256 paymentAmount = 1 ether;
-//     uint256 expectedFee = (paymentAmount * FEE_BPS) / 10000;
-//     uint256 initialVaultBalance = address(feeVault).balance;
-
-//     // Pay with ETH
-//     vm.prank(user);
-//     gateway.processPayment{value: paymentAmount}(
-//         merchantOwner,
-//         address(0),
-//         paymentAmount
-//     );
-
-//     // Fee collected in ETH
-//     assertEq(address(feeVault).balance, initialVaultBalance + expectedFee);
-// }
-
-function test_ProcessPaymentWithSwap() public {
-    // 1. Register Merchant
-    vm.prank(merchantOwner);
-    gateway.registerMerchant(
-        merchantWallet,
-        address(usdc),
-        0.01 ether,
-        10 ether
-    );
-
-    // 2. Allow ETH as a payment token
-    vm.prank(merchantOwner); 
-    gateway.setAllowedToken(address(0), true);
-
-    // 3. Configure the Swap Adapter (Contract Owner only)
-    vm.prank(owner);
-    gateway.setSwapConfig(
-        merchantOwner, 
-        address(swapAdapter), 
-        true, 
-        100 // 1% slippage
-    );
-
-    // 4. Enable Swap on Merchant profile
-    vm.prank(merchantOwner);
-    gateway.updateMerchant(merchantWallet, address(usdc), true);
-
-    // 5. Funding
-    vm.deal(user, 2 ether);
-    // Fund the adapter so it has USDC to send to the merchant
-    usdc.mint(address(swapAdapter), 10_000 * 10**6);
-
-    uint256 paymentAmount = 1 ether;
-    uint256 expectedFee = (paymentAmount * FEE_BPS) / 10000;
-    
-    uint256 initialVaultBalance = address(feeVault).balance;
-    uint256 initialMerchantUSDC = usdc.balanceOf(merchantWallet);
-
-    // 6. Process the Payment
-    vm.prank(user);
-    gateway.processPayment{value: paymentAmount}(
-        merchantOwner,
-        address(0), // Paying with ETH
-        paymentAmount
-    );
-
-    // 7. Assertions
-    // Check ETH fee reached the vault
-    assertEq(address(feeVault).balance, initialVaultBalance + expectedFee, "Fee mismatch");
-
-    // Check Merchant received USDC (Price 2000 * 0.99 ETH after fee * 0.997 adapter fee)
-    // The exact amount depends on your Mock's math, but it should be > 0.
-    uint256 merchantReceived = usdc.balanceOf(merchantWallet) - initialMerchantUSDC;
-    assertGt(merchantReceived, 0, "Merchant did not receive any USDC");
-    
-    console.log("Merchant received USDC:", merchantReceived);
-
-    // Ensure no ETH is stuck in the Gateway contract
-    assertEq(address(gateway).balance, 0, "ETH stuck in gateway");
-}    function test_Revert_UnregisteredMerchant() public {
+        // Ensure no ETH is stuck in the Gateway contract
+        assertEq(address(gateway).balance, 0, "ETH stuck in gateway");
+    }
+    function test_Revert_UnregisteredMerchant() public {
         vm.expectRevert(abi.encodeWithSignature("MerchantNotRegistered()"));
 
         vm.prank(user);
         gateway.processPayment(merchantOwner, address(0), 1 ether);
     }
 
-
     function test_ProcessMultipleSettlementTokens() public {
-    vm.startPrank(merchantOwner);
-    gateway.registerMerchant(merchantWallet, address(usdc), 1, 1000 ether);
-    
-    // Whitelist DAI as an additional settlement token
-    gateway.setAllowedToken(address(dai), true);
-    vm.stopPrank();
+        vm.startPrank(merchantOwner);
+        gateway.registerMerchant(merchantWallet, address(usdc), 1, 1000 ether);
 
-    // Pay with DAI (should work now without swapping to USDC)
-    uint256 paymentAmount = 100 * 10**18;
-    vm.prank(user);
-    dai.approve(address(gateway), paymentAmount);
+        // Whitelist DAI as an additional settlement token
+        gateway.setAllowedToken(address(dai), true);
+        vm.stopPrank();
 
-    vm.prank(user);
-    gateway.processPayment(merchantOwner, address(dai), paymentAmount);
+        // Pay with DAI (should work now without swapping to USDC)
+        uint256 paymentAmount = 100 * 10 ** 18;
+        vm.prank(user);
+        dai.approve(address(gateway), paymentAmount);
 
-    assertEq(dai.balanceOf(merchantWallet), paymentAmount - gateway.calculateFee(paymentAmount));
-}
+        vm.prank(user);
+        gateway.processPayment(merchantOwner, address(dai), paymentAmount);
 
-//     function test_Revert_InvalidToken() public {
-//     // Register merchant
-//     vm.prank(merchantOwner);
-//     gateway.registerMerchant(
-//         merchantWallet,
-//         address(usdc),
-//         100 * 10 ** 6,
-//         10000 * 10 ** 6
-//     );
+        assertEq(
+            dai.balanceOf(merchantWallet),
+            paymentAmount - gateway.calculateFee(paymentAmount)
+        );
+    }
 
-//     // User tries to pay with unsupported token (DAI)
-//     vm.expectRevert(abi.encodeWithSignature("MerchantNotRegistered()"));
+    function test_Revert_InvalidToken() public {
+        // 1. Register merchant with a wide range to be safe
+        vm.prank(merchantOwner);
+        gateway.registerMerchant(
+            merchantWallet,
+            address(usdc),
+            1, // min
+            1000 ether // max
+        );
 
-//     vm.prank(user);
-//     dai.approve(address(gateway), 1000 * 10 ** 18);
+        // 2. Try to pay with DAI (which isn't whitelisted) using a valid amount
+        vm.expectRevert(abi.encodeWithSignature("InvalidToken()"));
 
-//     vm.prank(user);
-//     gateway.processPayment(
-//         merchantOwner,
-//         address(dai),
-//         1000 * 10 ** 18
-//     );
-// }
-
-
-function test_Revert_InvalidToken() public {
-    // 1. Register merchant with a wide range to be safe
-    vm.prank(merchantOwner);
-    gateway.registerMerchant(
-        merchantWallet, 
-        address(usdc), 
-        1,              // min
-        1000 ether      // max
-    );
-
-    // 2. Try to pay with DAI (which isn't whitelisted) using a valid amount
-    vm.expectRevert(abi.encodeWithSignature("InvalidToken()"));
-
-    vm.prank(user);
-    gateway.processPayment(merchantOwner, address(dai), 10 ether); 
-}
-
+        vm.prank(user);
+        gateway.processPayment(merchantOwner, address(dai), 10 ether);
+    }
 
     function test_PauseUnpause() public {
         vm.prank(owner);
@@ -441,7 +318,7 @@ function test_Revert_InvalidToken() public {
         );
         vm.stopPrank();
 
-vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
+        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
 
         vm.prank(user);
         gateway.processPayment{value: 1 ether}(

@@ -65,15 +65,6 @@ contract OrkiGateway is Ownable2Step, Pausable, ReentrancyGuard {
     error SwapNotAllowed();
     error TransferFailed();
 
-    // ========== CONSTRUCTOR ==========
-    // constructor(address _owner, address _feeVault, uint256 _feeBps) Ownable(_owner) {
-    //     require(_feeVault != address(0), "Invalid fee vault");
-    //     require(_feeBps <= 500, "Fee too high"); // Max 5%
-
-    //     feeVault = FeeVault(_feeVault);
-    //     feeBps = _feeBps;
-    // }
-
     constructor(
         address _owner,
         address _feeVault,
@@ -139,138 +130,75 @@ contract OrkiGateway is Ownable2Step, Pausable, ReentrancyGuard {
         emit TokenAllowed(msg.sender, token, allowed);
     }
 
-    // ========== PAYMENT PROCESSING ==========
-    // function processPayment(
-    //     address merchantOwner,
-    //     address token,
-    //     uint256 amount
-    // ) external payable nonReentrant whenNotPaused {
-    //     Merchant memory merchant = merchants[merchantOwner];
-
-    //     // Validations
-    //     if (!merchant.registered) revert MerchantNotRegistered();
-    //     if (amount < merchant.minPayment || amount > merchant.maxPayment)
-    //         revert InvalidAmount();
-    //     if (
-    //         token != merchant.settlementToken &&
-    //         !allowedTokens[merchantOwner][token]
-    //     ) revert InvalidToken();
-
-    //     // Check if swap is needed
-    //     bool needsSwap = token != merchant.settlementToken &&
-    //         merchant.swapEnabled;
-
-    //     if (needsSwap) {
-    //         _processWithSwap(merchantOwner, merchant, token, amount);
-    //     } else {
-    //         _processDirect(merchantOwner, merchant, token, amount);
-    //     }
-    // }
-
-    // function _processDirect(
-    //     address merchantOwner,
-    //     Merchant memory merchant,
-    //     address token,
-    //     uint256 amount
-    // ) internal {
-    //     // Validate token matches settlement token
-    //     require(token == merchant.settlementToken, "Token mismatch");
-
-    //     uint256 fee = (amount * feeBps) / 10000;
-    //     uint256 merchantAmount = amount - fee;
-
-    //     if (token == address(0)) {
-    //         // Native ETH
-    //         require(msg.value == amount, "ETH amount mismatch");
-
-    //         // Transfer fee to vault
-    //         (bool successFee, ) = address(feeVault).call{value: fee}("");
-    //         if (!successFee) revert TransferFailed();
-
-    //         // Transfer to merchant
-    //         (bool successMerch, ) = merchant.wallet.call{value: merchantAmount}(
-    //             ""
-    //         );
-    //         if (!successMerch) revert TransferFailed();
-    //     } else {
-    //         // ERC20
-    //         require(msg.value == 0, "ETH sent with ERC20");
-
-    //         // Transfer fee to vault
-    //         IERC20(token).transferFrom(msg.sender, address(feeVault), fee);
-
-    //         // Transfer to merchant
-    //         IERC20(token).transferFrom(
-    //             msg.sender,
-    //             merchant.wallet,
-    //             merchantAmount
-    //         );
-    //     }
-
-    //     emit PaymentProcessed(
-    //         msg.sender,
-    //         merchantOwner,
-    //         amount,
-    //         fee,
-    //         token,
-    //         false
-    //     );
-    // }
-
     function processPayment(
-    address merchantOwner,
-    address token,
-    uint256 amount
-) external payable nonReentrant whenNotPaused {
-    Merchant memory merchant = merchants[merchantOwner];
+        address merchantOwner,
+        address token,
+        uint256 amount
+    ) external payable nonReentrant whenNotPaused {
+        Merchant memory merchant = merchants[merchantOwner];
 
-    if (!merchant.registered) revert MerchantNotRegistered();
-    if (amount < merchant.minPayment || amount > merchant.maxPayment)
-        revert InvalidAmount();
+        if (!merchant.registered) revert MerchantNotRegistered();
+        if (amount < merchant.minPayment || amount > merchant.maxPayment)
+            revert InvalidAmount();
 
-    // NEW LOGIC: A token is valid if it's the primary settlement token OR explicitly allowed
-    bool isWhitelisted = (token == merchant.settlementToken || allowedTokens[merchantOwner][token]);
-    
-    if (!isWhitelisted) revert InvalidToken();
+        // NEW LOGIC: A token is valid if it's the primary settlement token OR explicitly allowed
+        bool isWhitelisted = (token == merchant.settlementToken ||
+            allowedTokens[merchantOwner][token]);
 
-    // Swap is only needed if the token isn't the primary one AND swap is enabled
-    // If swap is NOT enabled, we treat whitelisted tokens as direct settlement
-    bool needsSwap = (token != merchant.settlementToken && merchant.swapEnabled);
+        if (!isWhitelisted) revert InvalidToken();
 
-    if (needsSwap) {
-        _processWithSwap(merchantOwner, merchant, token, amount);
-    } else {
-        _processDirect(merchantOwner, merchant, token, amount);
-    }
-}
+        // Swap is only needed if the token isn't the primary one AND swap is enabled
+        // If swap is NOT enabled, we treat whitelisted tokens as direct settlement
+        bool needsSwap = (token != merchant.settlementToken &&
+            merchant.swapEnabled);
 
-function _processDirect(
-    address merchantOwner,
-    Merchant memory merchant,
-    address token,
-    uint256 amount
-) internal {
-    // REMOVE or CHANGE this line:
-    // require(token == merchant.settlementToken, "Token mismatch"); 
-
-    uint256 fee = (amount * feeBps) / 10000;
-    uint256 merchantAmount = amount - fee;
-
-    if (token == address(0)) {
-        require(msg.value == amount, "ETH amount mismatch");
-        (bool successFee, ) = address(feeVault).call{value: fee}("");
-        if (!successFee) revert TransferFailed();
-
-        (bool successMerch, ) = merchant.wallet.call{value: merchantAmount}("");
-        if (!successMerch) revert TransferFailed();
-    } else {
-        require(msg.value == 0, "ETH sent with ERC20");
-        IERC20(token).transferFrom(msg.sender, address(feeVault), fee);
-        IERC20(token).transferFrom(msg.sender, merchant.wallet, merchantAmount);
+        if (needsSwap) {
+            _processWithSwap(merchantOwner, merchant, token, amount);
+        } else {
+            _processDirect(merchantOwner, merchant, token, amount);
+        }
     }
 
-    emit PaymentProcessed(msg.sender, merchantOwner, amount, fee, token, false);
-}
+    function _processDirect(
+        address merchantOwner,
+        Merchant memory merchant,
+        address token,
+        uint256 amount
+    ) internal {
+        // REMOVE or CHANGE this line:
+        // require(token == merchant.settlementToken, "Token mismatch");
+
+        uint256 fee = (amount * feeBps) / 10000;
+        uint256 merchantAmount = amount - fee;
+
+        if (token == address(0)) {
+            require(msg.value == amount, "ETH amount mismatch");
+            (bool successFee, ) = address(feeVault).call{value: fee}("");
+            if (!successFee) revert TransferFailed();
+
+            (bool successMerch, ) = merchant.wallet.call{value: merchantAmount}(
+                ""
+            );
+            if (!successMerch) revert TransferFailed();
+        } else {
+            require(msg.value == 0, "ETH sent with ERC20");
+            IERC20(token).transferFrom(msg.sender, address(feeVault), fee);
+            IERC20(token).transferFrom(
+                msg.sender,
+                merchant.wallet,
+                merchantAmount
+            );
+        }
+
+        emit PaymentProcessed(
+            msg.sender,
+            merchantOwner,
+            amount,
+            fee,
+            token,
+            false
+        );
+    }
 
     function _processWithSwap(
         address merchantOwner,
@@ -298,7 +226,7 @@ function _processDirect(
             // Execute swap directly to merchant
             adapter.swapETHToToken{value: swapAmount}(
                 merchant.settlementToken,
-                swapAmount,
+                0,
                 merchant.wallet
             );
         } else {
