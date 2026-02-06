@@ -26,6 +26,13 @@ contract OrkiGateway is Ownable2Step, Pausable, ReentrancyGuard {
         uint256 slippageBps; // Max slippage in basis points (1% = 100)
     }
 
+    // ========== HELPER FUNCTION ==========
+    function calculateMinOutput(uint256 amount, uint256 slippageBps) internal pure returns (uint256) {
+        if (slippageBps > 10000) revert InvalidSlippage();
+        uint256 slippageAmount = (amount * slippageBps) / 10000;
+        return amount - slippageAmount;
+    }
+
     // ========== STATE VARIABLES ==========
     FeeVault public feeVault;
     uint256 public feeBps; // Basis points (100 = 1%)
@@ -33,6 +40,8 @@ contract OrkiGateway is Ownable2Step, Pausable, ReentrancyGuard {
     mapping(address => Merchant) public merchants;
     mapping(address => mapping(address => bool)) public allowedTokens;
     mapping(address => SwapConfig) public swapConfigs;
+    mapping(address => bool) public isApprovedAdapter;
+    mapping(address => address[]) private _merchantSupportedTokens;
 
     // ========== EVENTS ==========
     event MerchantRegistered(
@@ -55,6 +64,8 @@ contract OrkiGateway is Ownable2Step, Pausable, ReentrancyGuard {
         bool swapped
     );
     event TokenAllowed(address indexed merchant, address token, bool allowed);
+    event AdapterStatusUpdated(address indexed adapter, bool approved);
+    event SwapConfigUpdated(address indexed merchant, address adapter, bool enabled, uint256 slippageBps);
     event FeeUpdated(uint256 newFeeBps);
 
     // ========== ERRORS ==========
@@ -64,24 +75,36 @@ contract OrkiGateway is Ownable2Step, Pausable, ReentrancyGuard {
     error InvalidAmount();
     error SwapNotAllowed();
     error TransferFailed();
+    error AdapterNotApproved();
+    error InvalidSlippage();
+    error ArrayLengthMismatch();
+    error AlreadyRegistered();
+    error InvalidWallet();
+    error InvalidAdapter();
+    error AmountRangeInvalid();
+    error ZeroAmount();
 
     constructor(
         address _owner,
         address _feeVault,
         uint256 _feeBps
     ) Ownable(_owner) {
-        require(_feeVault != address(0), "Invalid fee vault");
-        require(_feeBps <= 500, "Fee too high");
-
+        if (_feeVault == address(0)) revert InvalidAddress();
+        if (_feeBps > 500) revert InvalidAmount(); // "Fee too high"
+        
         feeVault = FeeVault(payable(_feeVault));
         feeBps = _feeBps;
     }
 
     // ========== MODIFIERS ==========
     modifier onlyRegisteredMerchant(address merchantOwner) {
+        _checkRegisteredMerchant(merchantOwner);
+        _;
+    }
+
+    function _checkRegisteredMerchant(address merchantOwner) internal view {
         if (!merchants[merchantOwner].registered)
             revert MerchantNotRegistered();
-        _;
     }
 
     // ========== MERCHANT FUNCTIONS ==========
@@ -91,10 +114,11 @@ contract OrkiGateway is Ownable2Step, Pausable, ReentrancyGuard {
         uint256 minPayment,
         uint256 maxPayment
     ) external {
-        require(wallet != address(0), "Invalid wallet");
-        require(!merchants[msg.sender].registered, "Already registered");
-        require(minPayment <= maxPayment, "Invalid amount range");
-
+        if (wallet == address(0)) revert InvalidWallet();
+        if (merchants[msg.sender].registered) revert AlreadyRegistered();
+        if (minPayment > maxPayment) revert AmountRangeInvalid();
+        if (minPayment == 0) revert ZeroAmount();
+        
         merchants[msg.sender] = Merchant({
             wallet: wallet,
             settlementToken: settlementToken,
@@ -110,24 +134,54 @@ contract OrkiGateway is Ownable2Step, Pausable, ReentrancyGuard {
     function updateMerchant(
         address wallet,
         address settlementToken,
-        bool swapEnabled
+        bool swapEnabled,
+        uint256 minPayment,
+        uint256 maxPayment
     ) external onlyRegisteredMerchant(msg.sender) {
-        require(wallet != address(0), "Invalid wallet");
-
+        if (wallet == address(0)) revert InvalidWallet();
+        if (minPayment > maxPayment) revert AmountRangeInvalid();
+        if (minPayment == 0) revert ZeroAmount();
+        
         Merchant storage merchant = merchants[msg.sender];
         merchant.wallet = wallet;
         merchant.settlementToken = settlementToken;
         merchant.swapEnabled = swapEnabled;
+        merchant.minPayment = minPayment;
+        merchant.maxPayment = maxPayment;
 
         emit MerchantUpdated(msg.sender, wallet, settlementToken, swapEnabled);
     }
 
+
     function setAllowedToken(
-        address token,
-        bool allowed
-    ) external onlyRegisteredMerchant(msg.sender) {
-        allowedTokens[msg.sender][token] = allowed;
-        emit TokenAllowed(msg.sender, token, allowed);
+    address token,
+    bool allowed
+) external onlyRegisteredMerchant(msg.sender) {
+    // REMOVE this check to allow ETH (address(0)) as a whitelisted token
+    // if (token == address(0)) revert InvalidToken();
+    
+    bool currentlyAllowed = allowedTokens[msg.sender][token];
+    if (allowed && !currentlyAllowed) {
+        allowedTokens[msg.sender][token] = true;
+        _merchantSupportedTokens[msg.sender].push(token);
+    } else if (!allowed && currentlyAllowed) {
+        allowedTokens[msg.sender][token] = false;
+        // Remove from array
+        address[] storage tokens = _merchantSupportedTokens[msg.sender];
+        for (uint256 i = 0; i < tokens.length; i++) {
+            if (tokens[i] == token) {
+                tokens[i] = tokens[tokens.length - 1];
+                tokens.pop();
+                break;
+            }
+        }
+    }
+    
+    emit TokenAllowed(msg.sender, token, allowed);
+}
+
+    function getSupportedTokens(address merchantOwner) external view returns (address[] memory) {
+        return _merchantSupportedTokens[merchantOwner];
     }
 
     function processPayment(
@@ -147,8 +201,6 @@ contract OrkiGateway is Ownable2Step, Pausable, ReentrancyGuard {
 
         if (!isWhitelisted) revert InvalidToken();
 
-        // Swap is only needed if the token isn't the primary one AND swap is enabled
-        // If swap is NOT enabled, we treat whitelisted tokens as direct settlement
         bool needsSwap = (token != merchant.settlementToken &&
             merchant.swapEnabled);
 
@@ -165,29 +217,34 @@ contract OrkiGateway is Ownable2Step, Pausable, ReentrancyGuard {
         address token,
         uint256 amount
     ) internal {
-        // REMOVE or CHANGE this line:
-        // require(token == merchant.settlementToken, "Token mismatch");
+        // // Enforce direct settlement token
+        // if (token != merchant.settlementToken) {
+        //     revert InvalidToken(); // "Must use settlement token or enable swap"
+        // }
 
         uint256 fee = (amount * feeBps) / 10000;
         uint256 merchantAmount = amount - fee;
 
         if (token == address(0)) {
-            require(msg.value == amount, "ETH amount mismatch");
+            if (msg.value != amount) revert InvalidAmount();
+            
             (bool successFee, ) = address(feeVault).call{value: fee}("");
             if (!successFee) revert TransferFailed();
 
-            (bool successMerch, ) = merchant.wallet.call{value: merchantAmount}(
-                ""
-            );
+            (bool successMerch, ) = merchant.wallet.call{value: merchantAmount}("");
             if (!successMerch) revert TransferFailed();
         } else {
-            require(msg.value == 0, "ETH sent with ERC20");
-            IERC20(token).transferFrom(msg.sender, address(feeVault), fee);
-            IERC20(token).transferFrom(
+            if (msg.value != 0) revert InvalidAmount();
+            // Wrap unchecked transfers
+            bool successFee = IERC20(token).transferFrom(msg.sender, address(feeVault), fee);
+            if (!successFee) revert TransferFailed();
+
+            bool successMerch = IERC20(token).transferFrom(
                 msg.sender,
                 merchant.wallet,
                 merchantAmount
             );
+            if (!successMerch) revert TransferFailed();
         }
 
         emit PaymentProcessed(
@@ -201,96 +258,146 @@ contract OrkiGateway is Ownable2Step, Pausable, ReentrancyGuard {
     }
 
     function _processWithSwap(
-        address merchantOwner,
+    address merchantOwner,
+    Merchant memory merchant,
+    address token,
+    uint256 amount
+) internal {
+    SwapConfig memory config = swapConfigs[merchantOwner];
+    if (!config.enabled || config.adapter == address(0))
+        revert SwapNotAllowed();
+    
+    // Check if adapter is approved by owner
+    if (!isApprovedAdapter[config.adapter]) revert AdapterNotApproved();
+    
+    uint256 fee = (amount * feeBps) / 10000;
+    uint256 swapAmount = amount - fee;
+    
+    // For now, use 0 minOutput for testing
+    // TODO: Properly calculate min output in output token terms
+    uint256 minOutput = 0;
+
+    if (token == address(0)) {
+        _handleETHSwap(merchant, config.adapter, amount, fee, swapAmount, minOutput);
+    } else {
+        _handleTokenSwap(merchant, config.adapter, token, amount, fee, swapAmount, minOutput);
+    }
+
+    emit PaymentProcessed(
+        msg.sender,
+        merchantOwner,
+        amount,
+        fee,
+        token,
+        true
+    );
+}
+    function _handleETHSwap(
         Merchant memory merchant,
-        address token,
-        uint256 amount
-    ) internal {
-        SwapConfig memory config = swapConfigs[merchantOwner];
-        if (!config.enabled || config.adapter == address(0))
-            revert SwapNotAllowed();
+        address adapterAddr,
+        uint256 amount,
+        uint256 fee,
+        uint256 swapAmount,
+        uint256 minOutput
+    ) private {
+        // ETH -> Token
+        if (msg.value != amount) revert InvalidAmount();
 
-        uint256 fee = (amount * feeBps) / 10000;
-        uint256 swapAmount = amount - fee;
+        // Transfer fee to vault
+        (bool successFee, ) = address(feeVault).call{value: fee}("");
+        if (!successFee) revert TransferFailed();
 
-        ISwapAdapter adapter = ISwapAdapter(config.adapter);
-
-        if (token == address(0)) {
-            // ETH -> Token
-            require(msg.value == amount, "ETH amount mismatch");
-
-            // Transfer fee to vault
-            (bool successFee, ) = address(feeVault).call{value: fee}("");
-            if (!successFee) revert TransferFailed();
-
-            // Execute swap directly to merchant
-            adapter.swapETHToToken{value: swapAmount}(
-                merchant.settlementToken,
-                0,
-                merchant.wallet
-            );
-        } else {
-            // Token -> ETH or Token -> Token
-            require(msg.value == 0, "ETH sent with ERC20");
-
-            // Transfer from user to this contract
-            IERC20(token).transferFrom(msg.sender, address(this), amount);
-
-            // Transfer fee to vault
-            IERC20(token).transfer(address(feeVault), fee);
-
-            // Approve adapter
-            IERC20(token).approve(config.adapter, swapAmount);
-
-            if (merchant.settlementToken == address(0)) {
-                // Token -> ETH
-                adapter.swapTokenToETH(
-                    token,
-                    swapAmount,
-                    0, // minOutputAmount (TODO: enforce slippage)
-                    merchant.wallet
-                );
-            } else {
-                // Token -> Token
-                adapter.swapTokenToToken(
-                    token,
-                    merchant.settlementToken,
-                    swapAmount,
-                    0, // minOutputAmount
-                    merchant.wallet
-                );
-            }
-        }
-
-        emit PaymentProcessed(
-            msg.sender,
-            merchantOwner,
-            amount,
-            fee,
-            token,
-            true
+        // Execute swap directly to merchant
+        ISwapAdapter(adapterAddr).swapEthToToken{value: swapAmount}(
+            merchant.settlementToken,
+            minOutput,
+            merchant.wallet
         );
     }
 
+    function _handleTokenSwap(
+        Merchant memory merchant,
+        address adapterAddr,
+        address token,
+        uint256 amount,
+        uint256 fee,
+        uint256 swapAmount,
+        uint256 minOutput
+    ) private {
+        // Token -> ETH or Token -> Token
+        if (msg.value != 0) revert InvalidAmount();
+
+        // Transfer from user to this contract
+        if (!IERC20(token).transferFrom(msg.sender, address(this), amount)) 
+            revert TransferFailed();
+
+        // Transfer fee to vault
+        if (!IERC20(token).transfer(address(feeVault), fee)) 
+            revert TransferFailed();
+
+        // Approve adapter
+        if (!IERC20(token).approve(adapterAddr, swapAmount)) 
+            revert TransferFailed(); 
+
+        ISwapAdapter adapter = ISwapAdapter(adapterAddr); // Instantiate interface once
+
+        if (merchant.settlementToken == address(0)) {
+            // Token -> ETH
+            adapter.swapTokenToEth(
+                token,
+                swapAmount,
+                minOutput,
+                merchant.wallet
+            );
+        } else {
+            // Token -> Token
+            adapter.swapTokenToToken(
+                token,
+                merchant.settlementToken,
+                swapAmount,
+                minOutput,
+                merchant.wallet
+            );
+        }
+        
+        // CRITICAL: Reset approval to zero after swap
+        if (!IERC20(token).approve(adapterAddr, 0)) 
+            revert TransferFailed();
+    }
+
+
     // ========== ADMIN FUNCTIONS ==========
     function setFee(uint256 newFeeBps) external onlyOwner {
-        require(newFeeBps <= 500, "Fee too high");
+        if (newFeeBps > 500) revert InvalidAmount(); // "Fee too high"
         feeBps = newFeeBps;
         emit FeeUpdated(newFeeBps);
     }
 
+    function setApprovedAdapter(address adapter, bool approved) external onlyOwner {
+        if (adapter == address(0)) revert InvalidAdapter();
+        isApprovedAdapter[adapter] = approved;
+        emit AdapterStatusUpdated(adapter, approved);
+    }
+
     function setSwapConfig(
-        address merchantOwner,
         address adapter,
         bool enabled,
         uint256 slippageBps
-    ) external onlyOwner {
-        require(slippageBps <= 1000, "Slippage too high"); // Max 10%
-        swapConfigs[merchantOwner] = SwapConfig({
+    ) external onlyRegisteredMerchant(msg.sender) {
+        if (slippageBps > 1000) revert InvalidSlippage(); // Max 10%
+        
+        // Check adapter is approved by owner (or is address(0) to disable)
+        if (adapter != address(0)) {
+            if (!isApprovedAdapter[adapter]) revert AdapterNotApproved();
+        }
+        
+        swapConfigs[msg.sender] = SwapConfig({
             adapter: adapter,
             enabled: enabled,
             slippageBps: slippageBps
         });
+        
+        emit SwapConfigUpdated(msg.sender, adapter, enabled, slippageBps);
     }
 
     function pause() external onlyOwner {
@@ -310,7 +417,8 @@ contract OrkiGateway is Ownable2Step, Pausable, ReentrancyGuard {
             (bool success, ) = owner().call{value: amount}("");
             require(success, "Withdrawal failed");
         } else {
-            IERC20(token).transfer(owner(), amount);
+            bool success = IERC20(token).transfer(owner(), amount);
+            require(success, "Withdrawal failed");
         }
     }
 

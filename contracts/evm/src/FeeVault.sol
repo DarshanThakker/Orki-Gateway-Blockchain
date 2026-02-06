@@ -11,6 +11,10 @@ contract FeeVault is Ownable {
         uint256 amount,
         address recipient
     );
+    
+    // ========== ERRORS ==========
+    error TransferFailed();
+    error InvalidToken();
 
     constructor(address initialOwner) Ownable(initialOwner) {}
 
@@ -19,22 +23,18 @@ contract FeeVault is Ownable {
         emit FeeCollected(address(0), msg.value);
     }
 
-    // Collect ERC20 tokens (called by OrkiGateway)
-    function collectERC20(address token, uint256 amount) external {
-        IERC20(token).transferFrom(msg.sender, address(this), amount);
-        emit FeeCollected(token, amount);
-    }
-
     // Withdraw ETH to multisig
-    function withdrawETH(uint256 amount) external onlyOwner {
+    function withdrawEth(uint256 amount) external onlyOwner {
         (bool success, ) = owner().call{value: amount}("");
-        require(success, "FeeVault: ETH withdrawal failed");
+        if (!success) revert TransferFailed();
         emit FeeWithdrawn(address(0), amount, owner());
     }
 
     // Withdraw ERC20 to multisig
     function withdrawERC20(address token, uint256 amount) external onlyOwner {
-        IERC20(token).transfer(owner(), amount);
+        if (token == address(0)) revert InvalidToken();
+        bool success = IERC20(token).transfer(owner(), amount);
+        if (!success) revert TransferFailed();
         emit FeeWithdrawn(token, amount, owner());
     }
 

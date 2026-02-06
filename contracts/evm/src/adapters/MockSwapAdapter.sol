@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/token/ERC20/IERC20.sol";
-import "../interfaces/ISwapAdapter.sol";
-import "../Mock/MockERC20.sol";
+import {IERC20} from "@openzeppelin/token/ERC20/IERC20.sol";
+import {ISwapAdapter} from "../interfaces/ISwapAdapter.sol";
+import {MockERC20} from "../Mock/MockERC20.sol";
 
 contract MockSwapAdapter is ISwapAdapter {
     uint256 public constant MOCK_PRICE = 2000; // 1 ETH = 2000 USDC
@@ -17,25 +17,25 @@ contract MockSwapAdapter is ISwapAdapter {
     );
     
     // For testing - always returns fixed rate
-    function swapETHToToken(
-    address token,
-    uint256 minOutputAmount,
-    address recipient
-) external payable returns (uint256 amountOut) {
-    amountOut =
-        (msg.value * MOCK_PRICE * (10000 - FEE_BPS))
-        / 10000
-        / 1e18;
+    function swapEthToToken(
+        address token,
+        uint256 minOutputAmount,
+        address recipient
+    ) external payable returns (uint256 amountOut) {
+        amountOut =
+            (msg.value * MOCK_PRICE * (10000 - FEE_BPS))
+            / 10000
+            / 1e18;
 
-    require(amountOut >= minOutputAmount, "Insufficient output");
+        require(amountOut >= minOutputAmount, "Insufficient output");
 
-    // ✅ mint to recipient
-    MockERC20(token).mint(recipient, amountOut);
+        // ✅ mint to recipient
+        MockERC20(token).mint(recipient, amountOut);
 
-    emit SwapExecuted(msg.sender, token, amountOut, recipient);
-}
+        emit SwapExecuted(msg.sender, token, amountOut, recipient);
+    }
 
-    function swapTokenToETH(
+    function swapTokenToEth(
         address fromToken,
         uint256 amountIn,
         uint256 minOutputAmount,
@@ -61,7 +61,7 @@ contract MockSwapAdapter is ISwapAdapter {
     }
     
     // Quote functions
-    function getQuoteETHToToken(
+    function getQuoteEthToToken(
         address toToken,
         uint256 amountIn
     ) external pure returns (uint256 amountOut, uint256 fee) {
@@ -71,7 +71,7 @@ contract MockSwapAdapter is ISwapAdapter {
         return (amountOut, fee);
     }
     
-    function getQuoteTokenToETH(
+    function getQuoteTokenToEth(
         address fromToken,
         uint256 amountIn
     ) external pure returns (uint256 amountOut, uint256 fee) {
