@@ -16,8 +16,8 @@ contract MockERC20 is IERC20 {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
-    event Transfer(address indexed from, address indexed to, uint256 value);
-    event Approval(address indexed owner, address indexed spender, uint256 value);
+    // event Transfer(address indexed from, address indexed to, uint256 value);
+    // event Approval(address indexed owner, address indexed spender, uint256 value);
 
     constructor(string memory _name, string memory _symbol, uint8 _decimals) {
         name = _name;
@@ -409,7 +409,7 @@ contract OrkiGatewayTest is Test {
         assertGt(merchantWallet.balance, initialBalance);
     }
 
-    function test_FeeCalculation() public {
+    function test_FeeCalculation() public view{
         uint256 amount = 1000 ether;
         uint256 fee = gateway.calculateFee(amount);
         assertEq(fee, (amount * FEE_BPS) / 10000);
@@ -476,5 +476,134 @@ contract OrkiGatewayTest is Test {
         );
         
         vm.stopPrank();
+    }
+
+    function test_Revert_ProcessPaymentBelowMin() public {
+        vm.startPrank(merchantOwner);
+        gateway.registerMerchant(
+            merchantWallet,
+            1 ether, // Min 1 ETH
+            10 ether
+        );
+        gateway.setAllowedToken(address(0), true);
+        vm.stopPrank();
+
+        vm.expectRevert(abi.encodeWithSelector(OrkiGateway.InvalidAmount.selector));
+        
+        vm.prank(user);
+        // Try paying 0.5 ETH
+        gateway.processPayment{value: 0.5 ether}(
+            merchantOwner,
+            address(0),
+            0.5 ether
+        );
+    }
+
+    function test_Revert_ProcessPaymentAboveMax() public {
+        vm.startPrank(merchantOwner);
+        gateway.registerMerchant(
+            merchantWallet,
+            0.1 ether,
+            1 ether // Max 1 ETH
+        );
+        gateway.setAllowedToken(address(0), true);
+        vm.stopPrank();
+
+        vm.expectRevert(abi.encodeWithSelector(OrkiGateway.InvalidAmount.selector));
+
+        vm.prank(user);
+        // Try paying 2 ETH
+        gateway.processPayment{value: 2 ether}(
+            merchantOwner,
+            address(0),
+            2 ether
+        );
+    }
+
+    function test_Revert_ProcessPaymentETHValueMismatch() public {
+        vm.startPrank(merchantOwner);
+        gateway.registerMerchant(merchantWallet, 0.1 ether, 10 ether);
+        gateway.setAllowedToken(address(0), true);
+        vm.stopPrank();
+
+        vm.expectRevert(abi.encodeWithSelector(OrkiGateway.InvalidAmount.selector));
+
+        vm.prank(user);
+        // Send 0.5 ETH but say amount is 1 ETH
+        gateway.processPayment{value: 0.5 ether}(
+            merchantOwner,
+            address(0),
+            1 ether
+        );
+    }
+
+    function test_Revert_ProcessPaymentERC20ValueMismatch() public {
+        vm.startPrank(merchantOwner);
+        gateway.registerMerchant(merchantWallet, 100 * 10**6, 1000 * 10**6);
+        gateway.setAllowedToken(address(usdc), true);
+        vm.stopPrank();
+
+        uint256 amount = 100 * 10**6;
+        vm.prank(user);
+        usdc.approve(address(gateway), amount);
+
+        vm.expectRevert(abi.encodeWithSelector(OrkiGateway.InvalidAmount.selector));
+
+        vm.prank(user);
+        // Send ETH with ERC20 payment
+        gateway.processPayment{value: 1 ether}(
+            merchantOwner,
+            address(usdc),
+            amount
+        );
+    }
+
+    function test_Revert_RegisterMerchantAlreadyRegistered() public {
+        vm.startPrank(merchantOwner);
+        gateway.registerMerchant(merchantWallet, 1, 100);
+
+        vm.expectRevert(abi.encodeWithSelector(OrkiGateway.AlreadyRegistered.selector));
+        gateway.registerMerchant(merchantWallet, 1, 100);
+        vm.stopPrank();
+    }
+
+    function test_Revert_SetAllowedTokenNotMerchant() public {
+        // User is not a merchant
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(OrkiGateway.MerchantNotRegistered.selector));
+        gateway.setAllowedToken(address(usdc), true);
+    }
+
+    function test_Revert_UpdateMerchantNotRegistered() public {
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(OrkiGateway.MerchantNotRegistered.selector));
+        gateway.updateMerchant(user, 1, 100);
+    }
+
+    function test_EmergencyWithdrawETH() public {
+        // Send some ETH to the contract (forcefully or via receive)
+        // OrkiGateway has a receive() function
+        vm.deal(address(gateway), 5 ether);
+        
+        uint256 initialOwnerBalance = owner.balance;
+
+        vm.prank(owner);
+        gateway.emergencyWithdraw(address(0), 5 ether);
+
+        assertEq(owner.balance, initialOwnerBalance + 5 ether);
+        assertEq(address(gateway).balance, 0);
+    }
+
+     function test_EmergencyWithdrawERC20() public {
+        // Drop some USDC into the contract
+        usdc.mint(address(gateway), 1000 * 10**6);
+        
+        uint256 initialOwnerBalance = usdc.balanceOf(owner);
+
+        vm.prank(owner);
+        gateway.emergencyWithdraw(address(usdc), 1000 * 10**6);
+
+        assertEq(usdc.balanceOf(owner), initialOwnerBalance + 1000 * 10**6);
+        assertEq(usdc.balanceOf(address(gateway)), 0);
     }
 }
