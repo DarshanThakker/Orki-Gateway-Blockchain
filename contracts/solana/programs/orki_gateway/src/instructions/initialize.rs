@@ -1,6 +1,8 @@
 use anchor_lang::prelude::*;
 use crate::state::GlobalState;
 use crate::errors::ErrorCode;
+use crate::events::GlobalStateInitialized; // Add this import
+
 
 #[derive(Accounts)]
 pub struct Initialize<'info> {
@@ -29,5 +31,14 @@ pub fn initialize(
     state.fee_wallet = fee_wallet;
     state.paused = false;
     state.bump = ctx.bumps.global_state;
+    
+    // Emit event
+    emit!(GlobalStateInitialized {
+        admin: ctx.accounts.admin.key(),
+        fee_bps,
+        fee_wallet,
+        timestamp: Clock::get()?.unix_timestamp,
+    });
+    
     Ok(())
 }

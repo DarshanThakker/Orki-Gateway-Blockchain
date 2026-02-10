@@ -1,6 +1,7 @@
 use anchor_lang::prelude::*;
 use crate::state::Merchant;
 use crate::errors::ErrorCode;
+use crate::events::MerchantRegistered; // ADD THIS LINE
 
 #[derive(Accounts)]
 #[instruction(settlement_wallet: Pubkey, settlement_token: Pubkey, name: String)]
@@ -23,7 +24,7 @@ pub fn register_merchant(
     ctx: Context<RegisterMerchant>,
     settlement_wallet: Pubkey,
     settlement_token: Pubkey,
-    name: String, // We use this string as a seed now
+    name: String,
 ) -> Result<()> {
     require!(name.len() <= 32, ErrorCode::NameTooLong);
     
@@ -32,7 +33,18 @@ pub fn register_merchant(
     merchant.settlement_wallet = settlement_wallet;
     merchant.settlement_token = settlement_token;
     merchant.swap_enabled = false; 
-    merchant.name = name;
+    merchant.name = name.clone(); // Use clone for event
     merchant.bump = ctx.bumps.merchant;
+    
+    // Emit event
+    emit!(MerchantRegistered {
+        owner: ctx.accounts.owner.key(),
+        merchant: merchant.key(),
+        settlement_wallet,
+        settlement_token,
+        name,
+        timestamp: Clock::get()?.unix_timestamp,
+    });
+    
     Ok(())
 }
