@@ -5,7 +5,12 @@
   "type": "module",
   "scripts": {
     "lint:fix": "prettier */*.js \"*/**/*{.js,.ts}\" -w",
-    "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check"
+    "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check",
+    "test:merchant": "anchor test merchant.ts",
+    "test:admin": "anchor test admin.ts",
+    "test:payments": "anchor test payments.ts",
+    "test:integration": "anchor test integration.ts",
+    "test:all": "anchor test"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.32.1",
